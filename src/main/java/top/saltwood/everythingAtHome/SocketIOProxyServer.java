@@ -9,7 +9,7 @@ import java.util.Map;
 
 public class SocketIOProxyServer {
     protected final com.corundumstudio.socketio.SocketIOServer ioServer;
-    private com.corundumstudio.socketio.SocketIOClient centerClient = null;
+    public com.corundumstudio.socketio.SocketIOClient centerClient = null;
 
     public SocketIOProxyServer() {
         this(9300);
