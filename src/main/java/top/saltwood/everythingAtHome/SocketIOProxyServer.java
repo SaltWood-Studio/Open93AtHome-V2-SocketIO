@@ -6,6 +6,7 @@ import com.corundumstudio.socketio.Configuration;
 
 import java.io.FileInputStream;
 import java.util.Map;
+import java.util.UUID;
 
 public class SocketIOProxyServer {
     protected final com.corundumstudio.socketio.SocketIOServer ioServer;
@@ -16,7 +17,7 @@ public class SocketIOProxyServer {
     }
 
     public SocketIOProxyServer(int socketioPort) {
-        this("", socketioPort);
+        this("0.0.0.0", socketioPort);
     }
 
     public SocketIOProxyServer(String host, int socketioPort) {
@@ -47,7 +48,7 @@ public class SocketIOProxyServer {
                     public void onSuccess(Object o) {
                         if (ackRequest != null) ackRequest.sendAckData(o);
                     }
-                }, data);
+                }, data, client.getSessionId());
                 try {
                     waiter.wait(10000); // 等待 10 秒
                 } catch (InterruptedException e) {
@@ -59,10 +60,10 @@ public class SocketIOProxyServer {
     }
 
     private void addListeners() {
-        // Event for client connection
         this.ioServer.addConnectListener(client -> {
             client.sendEvent("message", "Welcome to Open93@Home! You can find us at https://github.com/SaltWood-Studio.");
             System.out.println("Client connected: " + client.getSessionId());
+            this.proxyWrapper(client, client.getHandshakeData().getAuthToken(), null, "cluster-connect");
         });
 
         // Event for receiving message from client
@@ -70,6 +71,12 @@ public class SocketIOProxyServer {
             this.proxyWrapper(client, data, ackRequest, "enable");
         });
 
+        this.ioServer.addEventListener("center-disconnect-cluster", Object.class, (client, data, ackRequest) -> {
+            this.ioServer.getAllClients()
+                    .stream()
+                    .filter(c -> c.getSessionId().equals(UUID.fromString(((Map<String, String>) data).get("sessionId"))))
+                    .forEach(c -> c.disconnect());
+        });
 
         this.ioServer.addEventListener("center-inject", Object.class, (client, data, ackRequest) -> {
             String handshakeSign;
@@ -80,6 +87,9 @@ public class SocketIOProxyServer {
             String requestData = (String) map.get("handshake");
             if (requestData.equals(handshakeSign)) {
                 this.centerClient = client;
+            }
+            else {
+                System.out.println("Center server authentication invalid.");
             }
         });
 
@@ -95,7 +105,7 @@ public class SocketIOProxyServer {
 
         // Event for client disconnect
         this.ioServer.addDisconnectListener(client -> {
-            this.proxyWrapper(client, new Object(), null, "disable");
+            this.proxyWrapper(client, new Object(), null, "cluster-disconnect");
         });
     }
 
