@@ -1,16 +1,26 @@
 package top.saltwood.everythingAtHome;
 
+import com.alibaba.fastjson2.JSON;
 import com.corundumstudio.socketio.AckCallback;
 import com.corundumstudio.socketio.ClientOperations;
 import com.corundumstudio.socketio.Configuration;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 public class SocketIOProxyServer {
     protected final com.corundumstudio.socketio.SocketIOServer ioServer;
     public com.corundumstudio.socketio.SocketIOClient centerClient = null;
+    protected FileWatcher watcher;
 
     public SocketIOProxyServer() {
         this(9300);
@@ -28,6 +38,7 @@ public class SocketIOProxyServer {
 
         // Create a new SocketIOServer instance
         this.ioServer = new com.corundumstudio.socketio.SocketIOServer(config);
+        this.watcher = new FileWatcher();
 
         this.addListeners();
     }
@@ -35,62 +46,41 @@ public class SocketIOProxyServer {
     public void proxyWrapper(com.corundumstudio.socketio.SocketIOClient client, Object data,
                              com.corundumstudio.socketio.AckRequest ackRequest,
                              String eventName){
-        if (this.centerClient == null) {
-            if (ackRequest.isAckRequested()) {
-                client.sendEvent("message", "Center server is down. Please try again later.");
-                client.disconnect();
-            }
-        } else {
-            Object waiter = new Object();
-            synchronized (waiter) { // 确保在 synchronized 块中调用 wait()
-                this.centerClient.sendEvent(eventName, new AckCallback<>(Object.class) {
-                    @Override
-                    public void onSuccess(Object o) {
-                        if (ackRequest != null) ackRequest.sendAckData(o);
-                    }
-                }, data, client.getSessionId());
-                try {
-                    waiter.wait(10000); // 等待 10 秒
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt(); // 恢复中断状态
-                    // 处理被中断的情况
-                }
-            }
+        String sign;
+        synchronized (watcher.handshakeString) {
+            sign = watcher.handshakeString;
         }
+        Request request = new Request.Builder()
+                .url("http://locahost:65012/93AtHome/socketio/" + eventName + "?sign=" + sign)
+                .addHeader("User-Agent", "93@Home-socket.io/1.0.0")
+                .method("POST", RequestBody.create(JSON.toJSONString(new HashMap<Object, Object>() {
+                    {
+                        put("sessionId", client.getSessionId().toString());
+                        put("data", data);
+                    }
+                }).getBytes()))
+                .build();
+        OkHttpClient c = new OkHttpClient();
+        Response response = null;
+        try {
+            response = c.newCall(request).execute();
+            if (!response.isSuccessful()) client.disconnect();
+            String json = response.body().byteString().toString();
+            Object res = JSON.parse(json);
+            if (ackRequest.isAckRequested() && !(eventName.equals("connect") || eventName.equals("disconnect"))) ackRequest.sendAckData(res);
+        } catch (IOException ignore) { }
     }
 
     private void addListeners() {
         this.ioServer.addConnectListener(client -> {
             client.sendEvent("message", "Welcome to Open93@Home! You can find us at https://github.com/SaltWood-Studio.");
             System.out.println("Client connected: " + client.getSessionId());
-            this.proxyWrapper(client, client.getHandshakeData().getAuthToken(), null, "cluster-connect");
+            this.proxyWrapper(client, client.getHandshakeData().getAuthToken(), null, "connect");
         });
 
         // Event for receiving message from client
         this.ioServer.addEventListener("enable", Object.class, (client, data, ackRequest) -> {
             this.proxyWrapper(client, data, ackRequest, "enable");
-        });
-
-        this.ioServer.addEventListener("center-disconnect-cluster", Object.class, (client, data, ackRequest) -> {
-            this.ioServer.getAllClients()
-                    .stream()
-                    .filter(c -> c.getSessionId().equals(UUID.fromString(((Map<String, String>) data).get("sessionId"))))
-                    .forEach(c -> c.disconnect());
-        });
-
-        this.ioServer.addEventListener("center-inject", Object.class, (client, data, ackRequest) -> {
-            String handshakeSign;
-            try (FileInputStream fis = new FileInputStream("./handshake")) {
-                handshakeSign = new String(fis.readAllBytes());
-            }
-            Map<String, Object> map = (Map<String, Object>) data;
-            String requestData = (String) map.get("handshake");
-            if (requestData.equals(handshakeSign)) {
-                this.centerClient = client;
-            }
-            else {
-                System.out.println("Center server authentication invalid.");
-            }
         });
 
         // Event for receiving message from client
@@ -105,7 +95,7 @@ public class SocketIOProxyServer {
 
         // Event for client disconnect
         this.ioServer.addDisconnectListener(client -> {
-            this.proxyWrapper(client, new Object(), null, "cluster-disconnect");
+            this.proxyWrapper(client, new Object(), null, "disconnect");
         });
     }
 
